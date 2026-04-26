@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 
@@ -163,3 +164,81 @@ def test_make_a2a_send_func_imports_a2a_send_lazily(monkeypatch, tmp_path):
     assert sys.path == original_path
     assert send_func(to="dev", sid="a2a-test", sender="prd-bot", msg="Ping") == "Hermes reply"
     assert calls == [{"to": "dev", "sid": "a2a-test", "sender": "prd-bot", "msg": "Ping"}]
+
+
+def test_threaded_a2a_cli_mock_reply_outputs_threaded_result(tmp_path, capsys):
+    from agentthread.integrations.hermes.threaded_a2a_cli import main
+
+    db_path = tmp_path / "agentthread.db"
+
+    rc = main(
+        [
+            "--db",
+            str(db_path),
+            "--owner",
+            "product-dev",
+            "--to",
+            "prd",
+            "--topic",
+            "HackAgent repo baseline",
+            "--message",
+            "请确认基线。",
+            "--sender",
+            "研发侠",
+            "--sid",
+            "a2a-hackagent-baseline-test",
+            "--source-platform",
+            "telegram",
+            "--source-chat",
+            "409747388",
+            "--artifact",
+            '{"type":"repo","id":"openbuildxyz/hackagent"}',
+            "--next-action-json",
+            '{"actor":"product-dev","description":"继续盯 HackAgent issue"}',
+            "--metadata-json",
+            '{"scope":"test"}',
+            "--mock-reply",
+            "产品侠确认基线。",
+        ]
+    )
+
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["reply"] == "产品侠确认基线。"
+    assert out["thread"]["owner"] == "product-dev"
+    assert out["thread"]["participants"] == ["prd"]
+    assert out["thread"]["source"] == {"platform": "telegram", "chat_id": "409747388"}
+    assert out["thread"]["artifacts"] == [{"type": "repo", "id": "openbuildxyz/hackagent"}]
+    assert out["thread"]["next_action"] == {"actor": "product-dev", "description": "继续盯 HackAgent issue"}
+    assert out["thread"]["metadata"] == {"scope": "test"}
+    assert out["outbound_event"]["transport"] == {
+        "kind": "hermes_a2a",
+        "sid": "a2a-hackagent-baseline-test",
+        "to": "prd",
+    }
+
+
+def test_threaded_a2a_cli_rejects_task_type(tmp_path):
+    from agentthread.integrations.hermes.threaded_a2a_cli import main
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "--db",
+                str(tmp_path / "agentthread.db"),
+                "--owner",
+                "prd-bot",
+                "--to",
+                "dev",
+                "--topic",
+                "Bug fix",
+                "--message",
+                "Please fix this bug.",
+                "--thread-type",
+                "task",
+                "--mock-reply",
+                "ok",
+            ]
+        )
+
+    assert excinfo.value.code == 2

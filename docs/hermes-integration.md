@@ -69,6 +69,34 @@ It appends a `message_sent` event before calling the transport, then appends a `
 {to} replied: {first 240 characters of reply}
 ```
 
+## Usage With CLI
+
+For Hermes profiles, prefer the profile-local helper because it bakes in the correct owner/sender identity and local `a2a_send.py` path:
+
+```bash
+/home/bre/.hermes/profiles/prd-bot/skills/productivity/agentthread-collaboration-state/scripts/send_threaded_a2a.py \
+  --to dev \
+  --topic "Architecture check" \
+  --message "Can you review whether this approach is feasible?" \
+  --sid a2a-architecture-check \
+  --source-platform telegram \
+  --source-chat 409747388
+```
+
+Equivalent package CLI:
+
+```bash
+agent-thread-a2a \
+  --owner prd-bot \
+  --sender 产品侠 \
+  --to dev \
+  --topic "Architecture check" \
+  --message "Can you review whether this approach is feasible?" \
+  --sid a2a-architecture-check
+```
+
+Use `--mock-reply "..."` for dry-run verification without calling the Hermes gateway. The CLI intentionally only supports `--thread-type consultation`; task handoff still goes through Multica.
+
 ## Usage With Local Hermes
 
 If the local Hermes A2A script exists at `~/.hermes/skills/productivity/a2a-chat/scripts/a2a_send.py`, use the lazy adapter:
