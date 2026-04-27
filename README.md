@@ -44,8 +44,9 @@ For stable agent collaboration, use the high-level workflow CLI first:
 - `agentthread ask` — consultation/review; always records an AgentThread.
 - `agentthread notify` — human notification; rejects agent targets.
 - `agentthread audit` — flags raw A2A transcripts without AgentThread state.
-- `agentthread doctor` — checks local readiness.
+- `agentthread doctor` — checks local readiness and optional `agentthread.yaml`.
 - `agentthread policy` — prints active workflow guardrails.
+- `agentthread init` — writes a starter `agentthread.yaml`.
 
 The lower-level `agent-thread` CLI remains available for direct state inspection and repair.
 

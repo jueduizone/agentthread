@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import allowed_task_backends, load_config, write_default_config
 from .integrations.hermes.a2a_thread_wrapper import make_a2a_send_func, send_threaded_a2a
 from .policy import default_policy, ensure_backend_allowed
 from .store import Store
@@ -39,6 +40,7 @@ AGENT_TARGETS = {
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agentthread")
     parser.add_argument("--db", help="SQLite DB path. Defaults to ~/.agent-thread/agentthread.db")
+    parser.add_argument("--config", help="Path to agentthread.yaml")
     sub = parser.add_subparsers(dest="command", required=True)
 
     ask = sub.add_parser("ask", help="Ask another agent for consultation; always records AgentThread state.")
@@ -60,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     task_create.add_argument("--description", required=True)
     task_create.add_argument("--backend", choices=["mock", "multica", "github", "linear"], help="Task backend; required so tasks cannot silently go over chat.")
     task_create.add_argument("--allowed-task-backend", action="append", default=[], help="Policy allow-list for task backends. Can be repeated.")
+    task_create.add_argument("--config", dest="command_config", help="Path to agentthread.yaml")
     task_create.add_argument("--artifact", action="append", default=[])
 
     notify = sub.add_parser("notify", help="Record a human notification; rejects agent targets.")
@@ -75,16 +78,26 @@ def main(argv: list[str] | None = None) -> int:
     audit.add_argument("--a2a-transcript-dir", default=str(Path("~/.hermes/a2a-transcripts").expanduser()))
     audit.add_argument("--stale-hours", type=float, default=24.0)
 
-    sub.add_parser("doctor", help="Check local AgentThread workflow readiness.")
+    doctor = sub.add_parser("doctor", help="Check local AgentThread workflow readiness.")
+    doctor.add_argument("--config", dest="command_config", help="Path to agentthread.yaml")
     sub.add_parser("policy", help="Print active workflow policy rules.")
+
+    init = sub.add_parser("init", help="Create a starter agentthread.yaml")
+    init.add_argument("--dir", default=".")
+    init.add_argument("--overwrite", action="store_true")
 
     args = parser.parse_args(argv)
     store = Store(args.db)
+    config_path = getattr(args, "command_config", None) or args.config
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError as exc:
+        parser.error(f"Config not found: {exc}")
 
     if args.command == "ask":
         result = _ask(args, store, parser)
     elif args.command == "task" and args.task_command == "create":
-        result = _task_create(args, store, parser)
+        result = _task_create(args, store, parser, config)
     elif args.command == "notify":
         result = _notify(args, store, parser)
     elif args.command == "status":
@@ -92,9 +105,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "audit":
         result = _audit(args, store)
     elif args.command == "doctor":
-        result = _doctor(store)
+        result = _doctor(store, config=config, config_path=config_path)
     elif args.command == "policy":
         result = default_policy()
+    elif args.command == "init":
+        path = write_default_config(args.dir, overwrite=args.overwrite)
+        result = {"status": "ok", "config_path": str(path)}
     else:
         parser.error("Unsupported command")
 
@@ -121,11 +137,12 @@ def _ask(args: argparse.Namespace, store: Store, parser: argparse.ArgumentParser
     )
 
 
-def _task_create(args: argparse.Namespace, store: Store, parser: argparse.ArgumentParser) -> dict[str, Any]:
+def _task_create(args: argparse.Namespace, store: Store, parser: argparse.ArgumentParser, config: dict[str, Any]) -> dict[str, Any]:
     if not args.backend:
         parser.error("--backend is required for task create; tasks must use a task backend, not chat/A2A")
+    allowed = args.allowed_task_backend or allowed_task_backends(config)
     try:
-        ensure_backend_allowed(args.backend, args.allowed_task_backend)
+        ensure_backend_allowed(args.backend, allowed)
     except ValueError as exc:
         parser.error(str(exc))
     artifacts = [_json_object(value, parser, "--artifact") for value in args.artifact]
@@ -205,8 +222,9 @@ def _audit(args: argparse.Namespace, store: Store) -> dict[str, Any]:
     return {"status": "ok" if not findings else "warn", "findings": findings}
 
 
-def _doctor(store: Store) -> dict[str, Any]:
+def _doctor(store: Store, *, config: dict[str, Any] | None = None, config_path: str | None = None) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
+    config = config or {}
     try:
         with store._connect() as conn:
             conn.execute("SELECT 1").fetchone()
@@ -216,7 +234,13 @@ def _doctor(store: Store) -> dict[str, Any]:
     policy = default_policy()
     checks.append({"code": "policy_loaded", "status": "ok", "message": f"{len(policy['rules'])} rules"})
     checks.append({"code": "raw_transport_disabled", "status": "ok", "message": "Use ask/task/notify high-level workflows."})
-    status = "ok" if all(check["status"] == "ok" for check in checks) else "fail"
+    if config_path:
+        checks.append({"code": "config_loaded", "status": "ok", "message": config_path})
+        agents = config.get("agents") or {}
+        backends = config.get("task_backends") or {}
+        checks.append({"code": "agents_configured", "status": "ok" if agents else "warn", "message": str(len(agents))})
+        checks.append({"code": "task_backends_configured", "status": "ok" if backends else "warn", "message": str(len(backends))})
+    status = "fail" if any(check["status"] == "fail" for check in checks) else "ok"
     return {"status": status, "checks": checks}
 
 
