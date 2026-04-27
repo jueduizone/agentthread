@@ -44,7 +44,7 @@ def test_mock_task_backend_returns_stable_task_ref(tmp_path):
     assert result["thread"]["artifacts"][-1]["id"] == task_ref["id"]
 
 
-def test_unsupported_non_mock_backend_fails_until_adapter_exists(tmp_path):
+def test_unsupported_backend_fails_until_adapter_exists(tmp_path):
     db_path = tmp_path / "agentthread.db"
 
     denied = run_agentthread(
@@ -60,7 +60,7 @@ def test_unsupported_non_mock_backend_fails_until_adapter_exists(tmp_path):
         "--description",
         "Fix login bug",
         "--backend",
-        "github",
+        "linear",
         check=False,
     )
 
