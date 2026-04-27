@@ -38,6 +38,15 @@ The project has no runtime dependencies beyond Python and SQLite from the standa
 
 ## Quickstart
 
+For stable agent collaboration, use the high-level workflow CLI first:
+
+- `agentthread task create` — work delegation; must use a task backend.
+- `agentthread ask` — consultation/review; always records an AgentThread.
+- `agentthread notify` — human notification; rejects agent targets.
+- `agentthread audit` — flags raw A2A transcripts without AgentThread state.
+
+The lower-level `agent-thread` CLI remains available for direct state inspection and repair.
+
 Create a thread when one agent owns a user request and another participant needs to help:
 
 ```bash
