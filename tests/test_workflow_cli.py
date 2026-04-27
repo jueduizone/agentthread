@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agentthread.store import Store
+
 
 def run_agentthread(db_path, *args, check=True):
     proc = subprocess.run(
@@ -143,3 +145,60 @@ def test_audit_flags_raw_a2a_without_thread(tmp_path):
     assert result["status"] == "warn"
     assert result["findings"][0]["code"] == "raw_a2a_without_thread"
     assert "a2a-raw-test-20260427" in result["findings"][0]["sid"]
+
+
+def test_audit_flags_a2a_reply_not_synced_to_thread(tmp_path):
+    db_path = tmp_path / "agentthread.db"
+    transcript_dir = tmp_path / "a2a-transcripts"
+    transcript_dir.mkdir()
+    sid = "thr_reply_sync_test"
+    (transcript_dir / f"{sid}.jsonl").write_text(
+        json.dumps({"sender": "产品虾", "target": "研发侠", "msg": "ping", "reply": "pong"}) + "\n"
+    )
+
+    store = Store(db_path)
+    store.create_thread(
+        thread_id=sid,
+        type="consultation",
+        owner="prd-bot",
+        participants=["dev"],
+        topic="reply sync test",
+        status="waiting_on_participant",
+    )
+    store.append_event(
+        sid,
+        type="message_sent",
+        actor="产品虾",
+        target="研发侠",
+        summary="Sent Hermes A2A message to dev.",
+        content="ping",
+        transport={"kind": "hermes_a2a", "sid": sid, "to": "dev"},
+    )
+
+    result = run_agentthread(
+        db_path,
+        "audit",
+        "--a2a-transcript-dir",
+        str(transcript_dir),
+    )
+    assert result["status"] == "warn"
+    assert any(
+        finding["code"] == "a2a_reply_not_synced_to_thread" and finding["thread_id"] == sid
+        for finding in result["findings"]
+    )
+
+    store.append_event(
+        sid,
+        type="message_received",
+        actor="研发侠",
+        target="产品虾",
+        summary="Dev replied via Hermes A2A.",
+        content="pong",
+    )
+    result = run_agentthread(
+        db_path,
+        "audit",
+        "--a2a-transcript-dir",
+        str(transcript_dir),
+    )
+    assert not any(finding["code"] == "a2a_reply_not_synced_to_thread" for finding in result["findings"])

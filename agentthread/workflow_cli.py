@@ -216,12 +216,13 @@ def _notify(args: argparse.Namespace, store: Store, parser: argparse.ArgumentPar
 
 def _audit(args: argparse.Namespace, store: Store) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
-    known_sids = _known_a2a_sids(store)
+    known_sid_threads = _known_a2a_sid_threads(store)
     transcript_dir = Path(args.a2a_transcript_dir).expanduser()
     if transcript_dir.exists():
         for path in sorted(transcript_dir.glob("*.jsonl")):
             sid = path.stem
-            if sid not in known_sids:
+            thread_ids = known_sid_threads.get(sid)
+            if not thread_ids:
                 findings.append(
                     {
                         "level": "warn",
@@ -231,6 +232,8 @@ def _audit(args: argparse.Namespace, store: Store) -> dict[str, Any]:
                         "message": "A2A transcript has no matching AgentThread transport sid.",
                     }
                 )
+                continue
+            findings.extend(_a2a_reply_sync_findings(store, sid=sid, path=path, thread_ids=thread_ids))
     findings.extend(_stale_thread_findings(store, stale_hours=args.stale_hours))
     return {"status": "ok" if not findings else "warn", "findings": findings}
 
@@ -293,21 +296,68 @@ def _parse_utc(value: str) -> datetime:
     return parsed
 
 
-def _known_a2a_sids(store: Store) -> set[str]:
-    sids: set[str] = set()
+def _known_a2a_sid_threads(store: Store) -> dict[str, set[str]]:
+    sid_threads: dict[str, set[str]] = {}
     try:
         with store._connect() as conn:  # internal read for audit; no public event search API yet
-            rows = conn.execute("SELECT transport_json FROM events WHERE transport_json IS NOT NULL").fetchall()
+            rows = conn.execute("SELECT thread_id, transport_json FROM events WHERE transport_json IS NOT NULL").fetchall()
     except sqlite3.Error:
-        return sids
+        return sid_threads
     for row in rows:
         try:
             transport = json.loads(row["transport_json"])
         except (TypeError, json.JSONDecodeError):
             continue
         if transport.get("kind") == "hermes_a2a" and transport.get("sid"):
-            sids.add(str(transport["sid"]))
-    return sids
+            sid_threads.setdefault(str(transport["sid"]), set()).add(str(row["thread_id"]))
+    return sid_threads
+
+
+def _a2a_reply_sync_findings(store: Store, *, sid: str, path: Path, thread_ids: set[str]) -> list[dict[str, Any]]:
+    """Flag Hermes A2A replies that reached transcript storage but not AgentThread events."""
+    reply = _latest_transcript_reply(path)
+    if not reply:
+        return []
+    try:
+        with store._connect() as conn:
+            placeholders = ",".join("?" for _ in thread_ids)
+            rows = conn.execute(
+                f"SELECT DISTINCT thread_id FROM events WHERE type = 'message_received' AND thread_id IN ({placeholders})",
+                tuple(thread_ids),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+    synced = {str(row["thread_id"]) for row in rows}
+    missing = sorted(thread_ids - synced)
+    return [
+        {
+            "level": "warn",
+            "code": "a2a_reply_not_synced_to_thread",
+            "sid": sid,
+            "thread_id": thread_id,
+            "path": str(path),
+            "message": "A2A transcript contains a reply but AgentThread has no message_received event.",
+        }
+        for thread_id in missing
+    ]
+
+
+def _latest_transcript_reply(path: Path) -> str | None:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        reply = payload.get("reply")
+        if isinstance(reply, str) and reply.strip():
+            return reply
+    return None
 
 
 def _is_agent_target(target: str) -> bool:
