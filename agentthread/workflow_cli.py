@@ -20,6 +20,7 @@ from .config import allowed_task_backends, load_config, write_default_config
 from .integrations.hermes.a2a_thread_wrapper import make_a2a_send_func, send_threaded_a2a
 from .policy import default_policy, ensure_backend_allowed
 from .store import Store
+from .task_backends import TaskSpec, get_task_backend
 
 AGENT_TARGETS = {
     "prd",
@@ -146,7 +147,19 @@ def _task_create(args: argparse.Namespace, store: Store, parser: argparse.Argume
     except ValueError as exc:
         parser.error(str(exc))
     artifacts = [_json_object(value, parser, "--artifact") for value in args.artifact]
-    task_ref = {"backend": args.backend, "id": f"mock:{args.topic}" if args.backend == "mock" else None}
+    try:
+        backend = get_task_backend(args.backend)
+        task_ref = backend.create_task(
+            TaskSpec(
+                owner=args.owner,
+                assignee=args.assignee,
+                topic=args.topic,
+                description=args.description,
+                artifacts=artifacts,
+            )
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     thread = store.create_thread(
         type="task",
         owner=args.owner,
