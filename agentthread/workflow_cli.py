@@ -12,10 +12,12 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .integrations.hermes.a2a_thread_wrapper import make_a2a_send_func, send_threaded_a2a
+from .policy import default_policy, ensure_backend_allowed
 from .store import Store
 
 AGENT_TARGETS = {
@@ -57,6 +59,7 @@ def main(argv: list[str] | None = None) -> int:
     task_create.add_argument("--topic", required=True)
     task_create.add_argument("--description", required=True)
     task_create.add_argument("--backend", choices=["mock", "multica", "github", "linear"], help="Task backend; required so tasks cannot silently go over chat.")
+    task_create.add_argument("--allowed-task-backend", action="append", default=[], help="Policy allow-list for task backends. Can be repeated.")
     task_create.add_argument("--artifact", action="append", default=[])
 
     notify = sub.add_parser("notify", help="Record a human notification; rejects agent targets.")
@@ -70,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
 
     audit = sub.add_parser("audit", help="Run lightweight workflow compliance audit.")
     audit.add_argument("--a2a-transcript-dir", default=str(Path("~/.hermes/a2a-transcripts").expanduser()))
+    audit.add_argument("--stale-hours", type=float, default=24.0)
+
+    sub.add_parser("doctor", help="Check local AgentThread workflow readiness.")
+    sub.add_parser("policy", help="Print active workflow policy rules.")
 
     args = parser.parse_args(argv)
     store = Store(args.db)
@@ -84,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
         result = store.recent_threads(owner=args.owner, limit=args.limit)
     elif args.command == "audit":
         result = _audit(args, store)
+    elif args.command == "doctor":
+        result = _doctor(store)
+    elif args.command == "policy":
+        result = default_policy()
     else:
         parser.error("Unsupported command")
 
@@ -113,6 +124,10 @@ def _ask(args: argparse.Namespace, store: Store, parser: argparse.ArgumentParser
 def _task_create(args: argparse.Namespace, store: Store, parser: argparse.ArgumentParser) -> dict[str, Any]:
     if not args.backend:
         parser.error("--backend is required for task create; tasks must use a task backend, not chat/A2A")
+    try:
+        ensure_backend_allowed(args.backend, args.allowed_task_backend)
+    except ValueError as exc:
+        parser.error(str(exc))
     artifacts = [_json_object(value, parser, "--artifact") for value in args.artifact]
     task_ref = {"backend": args.backend, "id": f"mock:{args.topic}" if args.backend == "mock" else None}
     thread = store.create_thread(
@@ -186,7 +201,59 @@ def _audit(args: argparse.Namespace, store: Store) -> dict[str, Any]:
                         "message": "A2A transcript has no matching AgentThread transport sid.",
                     }
                 )
+    findings.extend(_stale_thread_findings(store, stale_hours=args.stale_hours))
     return {"status": "ok" if not findings else "warn", "findings": findings}
+
+
+def _doctor(store: Store) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    try:
+        with store._connect() as conn:
+            conn.execute("SELECT 1").fetchone()
+        checks.append({"code": "database_writable", "status": "ok", "message": str(store.db_path)})
+    except sqlite3.Error as exc:
+        checks.append({"code": "database_writable", "status": "fail", "message": str(exc)})
+    policy = default_policy()
+    checks.append({"code": "policy_loaded", "status": "ok", "message": f"{len(policy['rules'])} rules"})
+    checks.append({"code": "raw_transport_disabled", "status": "ok", "message": "Use ask/task/notify high-level workflows."})
+    status = "ok" if all(check["status"] == "ok" for check in checks) else "fail"
+    return {"status": status, "checks": checks}
+
+
+def _stale_thread_findings(store: Store, *, stale_hours: float) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    threshold_seconds = stale_hours * 3600
+    now = datetime.now(timezone.utc)
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT thread_id, status, owner, topic, updated_at FROM threads WHERE status IN ('open','waiting_on_owner','waiting_on_participant','in_progress','blocked')"
+        ).fetchall()
+    for row in rows:
+        updated = _parse_utc(row["updated_at"])
+        age = (now - updated).total_seconds()
+        if age >= threshold_seconds:
+            findings.append(
+                {
+                    "level": "warn",
+                    "code": "stale_active_thread",
+                    "thread_id": row["thread_id"],
+                    "owner": row["owner"],
+                    "status": row["status"],
+                    "topic": row["topic"],
+                    "age_hours": round(age / 3600, 2),
+                    "message": "Active thread has not been updated within the configured threshold.",
+                }
+            )
+    return findings
+
+
+def _parse_utc(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _known_a2a_sids(store: Store) -> set[str]:
